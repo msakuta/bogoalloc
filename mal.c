@@ -42,6 +42,7 @@ void *alloc(size_t size){
                 free_chunks.chunks[i].head += rounded_size;
                 free_chunks.chunks[i].sz -= rounded_size;
             }
+            break;
         }
     }
     if(ret == NULL){
@@ -61,11 +62,27 @@ void *alloc(size_t size){
 void freec(void *p){
     for(size_t i = 0; i < alloc_chunks.size; i++){
         if(alloc_chunks.chunks[i].head == p){
-            free_chunks.chunks[free_chunks.size] = alloc_chunks.chunks[i];
-            size_t *sz = &free_chunks.chunks[free_chunks.size].sz;
+            Chunk *chunk = &free_chunks.chunks[free_chunks.size];
+            *chunk = alloc_chunks.chunks[i];
+            size_t *sz = &chunk->sz;
             *sz = (*sz + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT; // Round up for free chunks
-            printf("freec: alloc_chunks.size = %lu, moving %lu\n", alloc_chunks.size, alloc_chunks.size - i - 1);
+            printf("freec(%ld): alloc_chunks.size = %lu, moving %lu\n", (unsigned char*)p - heap, alloc_chunks.size, alloc_chunks.size - i - 1);
             free_chunks.size++;
+            for(size_t j = 0; j < free_chunks.size - 1; j++){
+                Chunk *chunk_j = &free_chunks.chunks[j];
+                if(chunk->head + chunk->sz == chunk_j->head){
+                    printf("Merging back %lu\n", j);
+                    chunk->sz += chunk_j->sz;
+                    memmove(&free_chunks.chunks[j], &free_chunks.chunks[j + 1], (free_chunks.size - 1) * sizeof(Chunk));
+                    free_chunks.size--;
+                    break;
+                }
+                else if(chunk_j->head + chunk_j->sz == chunk->head){
+                    printf("Merging front %lu\n", j);
+                    chunk_j->sz += chunk->sz;
+                    free_chunks.size--;
+                }
+            }
             alloc_chunks.size--;
             memmove(&alloc_chunks.chunks[i], &alloc_chunks.chunks[i + 1], (alloc_chunks.size - i) * sizeof(Chunk));
             return;
@@ -157,6 +174,8 @@ int main(){
         else
             printf("ptr[%d]: NULL\n", i);
     }
+
+    alloc(128);
 
     dump_heap();
 
