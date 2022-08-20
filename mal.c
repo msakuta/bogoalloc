@@ -11,113 +11,105 @@ static unsigned char heap[HEAPSIZE] = {0};
 typedef struct Chunk {
     unsigned char *head;
     size_t sz;
+    struct Chunk *next;
 } Chunk;
 
-typedef struct ChunkList {
-    Chunk chunks[CHUNK_NUM];
-    size_t size;
-} ChunkList;
-
-static ChunkList alloc_chunks = {0};
-static ChunkList free_chunks = {
-    .chunks = {{
+static Chunk chunk_list[CHUNK_NUM] = {
+    {
         .head = heap,
-        .sz = HEAPSIZE
-    }},
-    .size = 1
+        .sz = HEAPSIZE,
+        .next = NULL
+    },
 };
+
+static Chunk *alloc_chunks = NULL;
+static Chunk *free_chunks = &chunk_list[0];
+static size_t used_chunks = 1;
 
 void *bogoalloc(size_t size){
     size_t rounded_size = (size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
 
     void *ret = NULL;
-    for(size_t i = 0; i < free_chunks.size; i++){
-        if(rounded_size <= free_chunks.chunks[i].sz){
-            ret = free_chunks.chunks[i].head;
-            if(rounded_size == free_chunks.chunks[i].sz){
-                memmove(&free_chunks.chunks[i], &free_chunks.chunks[i + 1], (free_chunks.size - 1) * sizeof(Chunk));
-                free_chunks.size--;
+    Chunk **free_iter = &free_chunks;
+    while(*free_iter){
+        if(rounded_size <= (*free_iter)->sz){
+            ret = (*free_iter)->head;
+            if(rounded_size == (*free_iter)->sz){
+                Chunk *new_chunk = *free_iter;
+                *free_iter = (*free_iter)->next;
+                new_chunk->next = alloc_chunks;
+                alloc_chunks = new_chunk;
             }
             else{
-                free_chunks.chunks[i].head += rounded_size;
-                free_chunks.chunks[i].sz -= rounded_size;
+                (*free_iter)->head += rounded_size;
+                (*free_iter)->sz -= rounded_size;
+
+                Chunk chunk = {
+                    .head = ret,
+                    .sz = size,
+                    .next = alloc_chunks
+                };
+
+                alloc_chunks = &chunk_list[used_chunks++];
+                *alloc_chunks = chunk;
             }
             break;
         }
+        free_iter = &(*free_iter)->next;
     }
-    if(ret == NULL){
-        return NULL;
-    }
-
-    Chunk chunk = {
-        .head = ret,
-        .sz = size,
-    };
-
-    alloc_chunks.chunks[alloc_chunks.size++] = chunk;
 
     return ret;
 }
 
 void bogofree(void *p){
-    for(size_t i = 0; i < alloc_chunks.size; i++){
-        if(alloc_chunks.chunks[i].head == p){
-            Chunk *chunk = &free_chunks.chunks[free_chunks.size];
-            *chunk = alloc_chunks.chunks[i];
+    Chunk **alloc_iter = &alloc_chunks;
+    while(*alloc_iter){
+        if((*alloc_iter)->head == p){
+            Chunk *deleting_chunk = *alloc_iter;
+            *alloc_iter = deleting_chunk->next;
+
+            Chunk *chunk = &chunk_list[used_chunks++];
+            *chunk = *deleting_chunk;
+            chunk->next = free_chunks;
+            free_chunks = chunk;
             size_t *sz = &chunk->sz;
             *sz = (*sz + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT; // Round up for free chunks
-            printf("bogofree(%ld): alloc_chunks.size = %lu, moving %lu\n", (unsigned char*)p - heap, alloc_chunks.size, alloc_chunks.size - i - 1);
-            free_chunks.size++;
-            for(size_t j = 0; j < free_chunks.size - 1; j++){
-                Chunk *chunk_j = &free_chunks.chunks[j];
-                if(chunk->head + chunk->sz == chunk_j->head){
-                    printf("Merging back %lu\n", j);
-                    chunk->sz += chunk_j->sz;
-                    memmove(&free_chunks.chunks[j], &free_chunks.chunks[j + 1], (free_chunks.size - 1) * sizeof(Chunk));
-                    free_chunks.size--;
-                    break;
-                }
-                else if(chunk_j->head + chunk_j->sz == chunk->head){
-                    printf("Merging front %lu\n", j);
-                    chunk_j->sz += chunk->sz;
-                    free_chunks.size--;
-                }
-            }
-            alloc_chunks.size--;
-            memmove(&alloc_chunks.chunks[i], &alloc_chunks.chunks[i + 1], (alloc_chunks.size - i) * sizeof(Chunk));
             return;
         }
+        alloc_iter = &(*alloc_iter)->next;
     }
-    printf("WARNING! couldn't find ptr in bogofree\n");
+    printf("WARNING! couldn't find ptr in bogofree %p\n", p);
 }
 
-void list_heap(const ChunkList* chunk_list){
+void list_heap(const Chunk* chunk){
     printf("----------------\n");
-    for(size_t i = 0; i < chunk_list->size; i++){
-        printf("[%lu] head: %ld, sz: %lu\n", i, chunk_list->chunks[i].head - heap, chunk_list->chunks[i].sz);
+    while(chunk){
+        printf("[%lu] head: %ld, sz: %lu\n", (size_t)(chunk - chunk_list), chunk->head - heap, chunk->sz);
+        chunk = chunk->next;
     }
 }
 
 void dump_heap(){
-    const Chunk* chunks = alloc_chunks.chunks;
     for(size_t i = 0; i < HEAPSIZE; i++){
         unsigned char* p = &heap[i];
 
         if (i % 128 == 0)
             printf("%06lu: ", p - heap);
 
-        int found = -1;
         char c = '?';
-        for(size_t j = 0; j < alloc_chunks.size; j++){
-            if (chunks[j].head <= p && p < chunks[j].head + chunks[j].sz){
-                found = j;
-                c = chunks[j].head == p ? '[' : chunks[j].head + chunks[j].sz - 1 == p ? ']' : j % 2 ? '*' : '+';
+        const Chunk *chunk = alloc_chunks;
+        size_t counter = 0;
+        while(chunk){
+            if (chunk->head <= p && p < chunk->head + chunk->sz){
+                c = chunk->head == p ? '[' : chunk->head + chunk->sz - 1 == p ? ']' : counter % 2 ? '*' : '+';
                 break;
             }
+            chunk = chunk->next;
+            counter++;
         }
 
-        for(size_t j = 0; j < free_chunks.size; j++){
-            const Chunk* chunk = &free_chunks.chunks[j];
+        chunk = free_chunks;
+        while(chunk){
             if (chunk->head == p){
                 c = '<';
                 break;
@@ -130,6 +122,7 @@ void dump_heap(){
                 c = '-';
                 break;
             }
+            chunk = chunk->next;
         }
 
         putchar(c);
@@ -153,12 +146,12 @@ int main(){
 
     bogofree(ptrs[0]);
     ptrs[0] = NULL;
-    // for(int i = 0; i < 10; i++){
-    //     if(i % 2 == 0){
-    //         bogofree(ptrs[i]);
-    //         ptrs[i] = NULL;
-    //     }
-    // }
+    for(int i = 2; i < 10; i++){
+        if(i % 2 == 0){
+            bogofree(ptrs[i]);
+            ptrs[i] = NULL;
+        }
+    }
 
     for(int i = 0; i < 5; i++){
         double *p = bogoalloc(8 + i + 5);
@@ -179,8 +172,8 @@ int main(){
 
     dump_heap();
 
-    list_heap(&alloc_chunks);
-    list_heap(&free_chunks);
+    list_heap(alloc_chunks);
+    list_heap(free_chunks);
 
 
     printf("sizeof size_t: %lu\n", sizeof(size_t));
