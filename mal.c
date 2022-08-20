@@ -16,19 +16,30 @@ typedef struct Chunk {
     struct Chunk *next;
 } Chunk;
 
-static Chunk chunk_list[CHUNK_NUM] = {
-    {
-        .head = heap,
-        .sz = HEAPSIZE,
-        .id = 0,
-        .next = NULL
-    },
-};
+static Chunk chunk_list[CHUNK_NUM];
 
 static Chunk *alloc_chunks = NULL;
-static Chunk *free_chunks = &chunk_list[0];
-static size_t used_chunks = 1;
+static Chunk *free_chunks = NULL;
+static Chunk *unused_chunks = NULL;
 static size_t id_gen = 1;
+
+void init_bogoalloc(){
+    for(size_t i = 0; i < CHUNK_NUM-1; i++){
+        chunk_list[i].next = &chunk_list[i + 1];
+    }
+
+    unused_chunks = &chunk_list[0];
+
+    Chunk *free = unused_chunks;
+    unused_chunks = free->next;
+    free->head = heap;
+    free->sz = HEAPSIZE;
+    free->id = 0;
+    free->next = NULL;
+    free_chunks = free;
+
+    // printf("unused %p free %p\n", )
+}
 
 void *bogoalloc(size_t size){
     size_t rounded_size = (size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
@@ -48,15 +59,13 @@ void *bogoalloc(size_t size){
                 (*free_iter)->head += rounded_size;
                 (*free_iter)->sz -= rounded_size;
 
-                Chunk chunk = {
-                    .head = ret,
-                    .sz = size,
-                    .id = id_gen++,
-                    .next = alloc_chunks
-                };
-
-                alloc_chunks = &chunk_list[used_chunks++];
-                *alloc_chunks = chunk;
+                Chunk *next_alloc = alloc_chunks;
+                alloc_chunks = unused_chunks;
+                unused_chunks = unused_chunks->next;
+                alloc_chunks->head = ret;
+                alloc_chunks->sz = size;
+                alloc_chunks->id = id_gen++;
+                alloc_chunks->next = next_alloc;
             }
             break;
         }
@@ -72,27 +81,28 @@ void bogofree(void *p){
     Chunk **alloc_iter = &alloc_chunks;
     while(*alloc_iter){
         if((*alloc_iter)->head == p){
-            Chunk *deleting_chunk = *alloc_iter;
-            *alloc_iter = deleting_chunk->next;
+            Chunk *freeing_chunk = *alloc_iter;
+            *alloc_iter = freeing_chunk->next;
 
-            Chunk *chunk = &chunk_list[used_chunks++];
-            *chunk = *deleting_chunk;
-            chunk->next = free_chunks;
-            free_chunks = chunk;
-            size_t *sz = &chunk->sz;
+            freeing_chunk->next = free_chunks;
+            free_chunks = freeing_chunk;
+            size_t *sz = &freeing_chunk->sz;
             *sz = (*sz + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT; // Round up for free chunks
 
-            BOGOFREE_DEBUG("[%lu] Start searching neighbor free chunks (%lu, %lu)\n", chunk->id, chunk->head - heap, chunk->head + chunk->sz - heap);
+            BOGOFREE_DEBUG("[%lu] Start searching neighbor free chunks (%lu, %lu)\n", freeing_chunk->id, freeing_chunk->head - heap, freeing_chunk->head + freeing_chunk->sz - heap);
 
             Chunk **neighbor_iter = &free_chunks;
             int merged = 0;
             while(*neighbor_iter){
                 // size_t next_sz = ((*neighbor_iter)->sz + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
                 BOGOFREE_DEBUG("   Examining chunk %lu (%lu, %lu)\n", (*neighbor_iter)->id, (*neighbor_iter)->head - heap, (*neighbor_iter)->head + (*neighbor_iter)->sz - heap);
-                if(*neighbor_iter != chunk && (*neighbor_iter)->head == chunk->head + chunk->sz){
-                    BOGOFREE_DEBUG("[%lu] Merging %lu next (%ld, %ld)\n", chunk->id, (*neighbor_iter)->id, (intptr_t)((*neighbor_iter)->head - heap), (intptr_t)(chunk->head - heap));
-                    chunk->sz += (*neighbor_iter)->sz;
+                if(*neighbor_iter != freeing_chunk && (*neighbor_iter)->head == freeing_chunk->head + freeing_chunk->sz){
+                    BOGOFREE_DEBUG("[%lu] Merging %lu next (%ld, %ld)\n", freeing_chunk->id, (*neighbor_iter)->id, (intptr_t)((*neighbor_iter)->head - heap), (intptr_t)(freeing_chunk->head - heap));
+                    freeing_chunk->sz += (*neighbor_iter)->sz;
+                    Chunk *unused_next = unused_chunks;
+                    unused_chunks = *neighbor_iter;
                     *neighbor_iter = (*neighbor_iter)->next;
+                    unused_chunks->next = unused_next;
                     merged = 1;
                     break;
                 }
@@ -100,17 +110,20 @@ void bogofree(void *p){
             }
             neighbor_iter = &free_chunks;
             while(*neighbor_iter){
-                if(*neighbor_iter != chunk && (*neighbor_iter)->head + (*neighbor_iter)->sz == chunk->head){
-                    BOGOFREE_DEBUG("[%lu] Merging %lu prev (%ld, %ld)\n", chunk->id, (*neighbor_iter)->id, (intptr_t)((*neighbor_iter)->head - heap), (intptr_t)(chunk->head - heap));
-                    (*neighbor_iter)->sz += chunk->sz;
-                    free_chunks = chunk->next;
+                if(*neighbor_iter != freeing_chunk && (*neighbor_iter)->head + (*neighbor_iter)->sz == freeing_chunk->head){
+                    BOGOFREE_DEBUG("[%lu] Merging %lu prev (%ld, %ld)\n", freeing_chunk->id, (*neighbor_iter)->id, (intptr_t)((*neighbor_iter)->head - heap), (intptr_t)(freeing_chunk->head - heap));
+                    (*neighbor_iter)->sz += freeing_chunk->sz;
+                    Chunk *unused_next = unused_chunks;
+                    unused_chunks = freeing_chunk;
+                    free_chunks = freeing_chunk->next;
+                    unused_chunks->next = unused_next;
                     merged = 1;
                     break;
                 }
                 neighbor_iter = &(*neighbor_iter)->next;
             }
             if(!merged)
-                BOGOFREE_DEBUG("[%lu] Moving chunk to free list\n", chunk->id);
+                BOGOFREE_DEBUG("[%lu] Moving chunk to free list\n", freeing_chunk->id);
             return;
         }
         alloc_iter = &(*alloc_iter)->next;
@@ -118,12 +131,13 @@ void bogofree(void *p){
     BOGOFREE_DEBUG("WARNING! couldn't find ptr in bogofree %p\n", p);
 }
 
-void dump_chunk_list(){
-    for(size_t i = 0; i < used_chunks; i++){
-        const Chunk *chunk = &chunk_list[i];
-        printf("[%lu] head: %p, sz: %lu, id: %lu, next: %p\n", i, chunk->head, chunk->sz, chunk->id, chunk->next);
-    }
-}
+// There is no trivial way to dump all lists without iterating each linked list
+// void dump_chunk_list(){
+//     for(size_t i = 0; i < used_chunks; i++){
+//         const Chunk *chunk = &chunk_list[i];
+//         printf("[%lu] head: %p, sz: %lu, id: %lu, next: %p\n", i, chunk->head, chunk->sz, chunk->id, chunk->next);
+//     }
+// }
 
 void list_heap(const Chunk* chunk, const char* name){
     printf("<--------------- %s ----------->\n", name);
@@ -132,6 +146,15 @@ void list_heap(const Chunk* chunk, const char* name){
         chunk = chunk->next;
     }
     printf("</-------------- %s ----------->\n", name);
+}
+
+size_t count_chunks(const Chunk* chunk){
+    size_t ret = 0;
+    while(chunk){
+        ret++;
+        chunk = chunk->next;
+    }
+    return ret;
 }
 
 void dump_heap(){
@@ -192,6 +215,9 @@ void dump_heap(){
 int main(){
     printf("heap head = %p\n", heap);
 
+    init_bogoalloc();
+    printf("Unused chunks: %lu\n", count_chunks(unused_chunks));
+
     double *ptrs[15] = {NULL};
 
     for(int i = 0; i < 10; i++){
@@ -228,12 +254,13 @@ int main(){
             printf("ptr[%d]: NULL\n", i);
     }
 
-    // bogoalloc(128);
+    bogoalloc(128);
 
     dump_heap();
 
     list_heap(alloc_chunks, "Allocated");
     list_heap(free_chunks, "Freed");
+    printf("Unused chunks: %lu\n", count_chunks(unused_chunks));
 
     // dump_chunk_list();
 
